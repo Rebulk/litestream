@@ -33,6 +33,7 @@ var (
 	ErrNoSnapshots      = errors.New("no snapshots available")
 	ErrChecksumMismatch = errors.New("invalid replica, checksum mismatch")
 	ErrLTXCorrupted     = errors.New("ltx file corrupted")
+	ErrInstanceLocked   = errors.New("database already replicated by another litestream process")
 	ErrLTXMissing       = errors.New("ltx file missing")
 	ErrDiskFull         = errors.New("disk full")
 )

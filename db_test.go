@@ -2,6 +2,7 @@ package litestream_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/crc64"
 	"io"
@@ -1900,4 +1901,34 @@ func TestDB_ResetLocalState(t *testing.T) {
 	if posAfter.TXID != 0 {
 		t.Fatalf("expected zero TXID after reset, got %d", posAfter.TXID)
 	}
+}
+
+func TestDB_Open_RefusesSecondInstance(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := litestream.NewDB(path)
+	first.Replica = litestream.NewReplica(first)
+	first.Replica.Client = file.NewReplicaClient(filepath.Join(dir, "replica"))
+	if err := first.Open(); err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close(context.Background())
+
+	second := litestream.NewDB(path)
+	second.Replica = litestream.NewReplica(second)
+	second.Replica.Client = file.NewReplicaClient(filepath.Join(dir, "replica"))
+	if err := second.Open(); !errors.Is(err, litestream.ErrInstanceLocked) {
+		t.Fatalf("second Open err=%v, want ErrInstanceLocked", err)
+	}
+
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Open(); err != nil {
+		t.Fatalf("Open after first Close: %v", err)
+	}
+	_ = second.Close(context.Background())
 }

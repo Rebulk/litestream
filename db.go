@@ -71,6 +71,7 @@ type DB struct {
 	metaPath  string        // Path to the database metadata.
 	db        *sql.DB       // target database
 	f         *os.File      // long-running db file descriptor
+	lockFile  *os.File      // per-database instance lock, see acquireInstanceLock
 	rtx       *sql.Tx       // long running read transaction
 	pageSize  int           // page size, in bytes
 	notify    chan struct{} // closes on WAL change
@@ -771,6 +772,35 @@ func (db *DB) EnsureExists(ctx context.Context) error {
 	return nil
 }
 
+// acquireInstanceLock takes an exclusive advisory lock on <meta>/lock so a
+// second replicate process on the same database fails at Open instead of
+// racing the first one's L0 staging. Released by Close.
+func (db *DB) acquireInstanceLock() error {
+	if err := os.MkdirAll(db.metaPath, 0o755); err != nil {
+		return fmt.Errorf("cannot create meta directory: %w", err)
+	}
+	lockPath := filepath.Join(db.metaPath, "lock")
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return fmt.Errorf("cannot open instance lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("%w: %s", ErrInstanceLocked, lockPath)
+	}
+	db.lockFile = f
+	return nil
+}
+
+func (db *DB) releaseInstanceLock() {
+	if db.lockFile == nil {
+		return
+	}
+	_ = syscall.Flock(int(db.lockFile.Fd()), syscall.LOCK_UN)
+	_ = db.lockFile.Close()
+	db.lockFile = nil
+}
+
 // Open initializes the background monitoring goroutine.
 func (db *DB) Open() (err error) {
 	db.mu.Lock()
@@ -791,6 +821,14 @@ func (db *DB) Open() (err error) {
 	}
 	if db.MinCheckpointPageN <= 0 {
 		return fmt.Errorf("minimum checkpoint page count required")
+	}
+
+	// Refuse to run beside another replicate process on the same database.
+	// Two writers stage the same L0 through the same .tmp path and both
+	// upload it; that produced corrupt L0 objects on 2026-09-14 and
+	// 2026-09-16 when two processes overlapped.
+	if err := db.acquireInstanceLock(); err != nil {
+		return err
 	}
 
 	// Clear old temporary files that my have been left from a crash.
@@ -880,6 +918,7 @@ func (db *DB) Close(ctx context.Context) (err error) {
 		}
 	}
 
+	db.releaseInstanceLock()
 	return err
 }
 
