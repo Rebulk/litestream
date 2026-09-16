@@ -163,6 +163,10 @@ type DB struct {
 	// contiguous TXID ranges after each compaction.
 	VerifyCompaction bool
 
+	// CompactionMaxInputFiles bounds source files per compaction pass.
+	// Zero means unbounded; see Compactor.MaxInputFiles.
+	CompactionMaxInputFiles int
+
 	// RetentionEnabled controls whether Litestream actively deletes old files
 	// during retention enforcement. When false, cloud provider lifecycle
 	// policies handle retention instead. Local file cleanup still occurs.
@@ -344,6 +348,7 @@ func NewDB(path string) *DB {
 
 	// Initialize compactor with nil client (set once in Open() from Replica.Client).
 	db.compactor = NewCompactor(nil, db.Logger.With(LogKeySubsystem, LogSubsystemCompactor))
+	db.CompactionMaxInputFiles = DefaultCompactionMaxInputFiles
 	db.compactor.LocalFileOpener = db.openLocalLTXFile
 	db.compactor.LocalFileDeleter = db.deleteLocalLTXFile
 	db.compactor.CompactionVerifyErrorCounter = compactionVerifyErrorCounterVec.WithLabelValues(db.path)
@@ -795,6 +800,7 @@ func (db *DB) Open() (err error) {
 
 	// Set the compactor client once before starting any goroutines.
 	db.compactor.VerifyCompaction = db.VerifyCompaction
+	db.compactor.MaxInputFiles = db.CompactionMaxInputFiles
 	db.compactor.RetentionEnabled = db.RetentionEnabled
 	db.compactor.client = db.Replica.Client
 

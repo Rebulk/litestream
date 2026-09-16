@@ -51,7 +51,18 @@ type Compactor struct {
 	// CacheSetter optionally stores MaxLTXFileInfo for a level.
 	// If nil, max file info is not cached.
 	CacheSetter func(level int, info *ltx.FileInfo)
+
+	// MaxInputFiles bounds how many source files one Compact call merges.
+	// Every source is opened (one remote connection each) before merging
+	// starts, so an unbounded backlog holds one connection per file for the
+	// whole pass; a 63k-file L0 backlog exhausted the host's TCP memory.
+	// Remaining files are picked up by later passes. Zero means unbounded.
+	MaxInputFiles int
 }
+
+// DefaultCompactionMaxInputFiles is the default bound on source files per
+// compaction pass.
+const DefaultCompactionMaxInputFiles = 256
 
 // NewCompactor creates a new Compactor with the given client and logger.
 func NewCompactor(client ReplicaClient, logger *slog.Logger) *Compactor {
@@ -62,6 +73,7 @@ func NewCompactor(client ReplicaClient, logger *slog.Logger) *Compactor {
 		client:           client,
 		logger:           logger,
 		RetentionEnabled: true,
+		MaxInputFiles:    DefaultCompactionMaxInputFiles,
 	}
 }
 
@@ -127,6 +139,11 @@ func (c *Compactor) Compact(ctx context.Context, dstLevel int) (*ltx.FileInfo, e
 
 	var minTXID, maxTXID ltx.TXID
 	for itr.Next() {
+		if c.MaxInputFiles > 0 && len(rdrs) >= c.MaxInputFiles {
+			c.logger.Info("compaction input bounded; remaining source files deferred to a later pass",
+				"level", dstLevel, "max_input_files", c.MaxInputFiles)
+			break
+		}
 		info := itr.Item()
 
 		if minTXID == 0 || info.MinTXID < minTXID {

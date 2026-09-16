@@ -663,6 +663,32 @@ func TestCompactor_CompactWithVerification(t *testing.T) {
 	})
 }
 
+func TestCompactor_CompactBoundsInputFiles(t *testing.T) {
+	client := file.NewReplicaClient(t.TempDir())
+	compactor := litestream.NewCompactor(client, slog.Default())
+	compactor.MaxInputFiles = 2
+
+	for txid := ltx.TXID(1); txid <= 5; txid++ {
+		createTestLTXFile(t, client, 0, txid, txid)
+	}
+
+	// Each pass merges at most two source files, in TXID order, and the next
+	// pass resumes where the previous one stopped.
+	want := [][2]ltx.TXID{{1, 2}, {3, 4}, {5, 5}}
+	for i, w := range want {
+		info, err := compactor.Compact(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+		if info.MinTXID != w[0] || info.MaxTXID != w[1] {
+			t.Fatalf("pass %d: TXID range=%d-%d, want %d-%d", i, info.MinTXID, info.MaxTXID, w[0], w[1])
+		}
+	}
+	if _, err := compactor.Compact(context.Background(), 1); err != litestream.ErrNoCompaction {
+		t.Fatalf("err=%v, want ErrNoCompaction", err)
+	}
+}
+
 // containsString checks if s contains substr.
 func containsString(s, substr string) bool {
 	return bytes.Contains([]byte(s), []byte(substr))

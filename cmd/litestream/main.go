@@ -55,6 +55,7 @@ var (
 	ErrInvalidCompactionInterval       = errors.New("compaction interval must be greater than 0")
 	ErrInvalidSyncInterval             = errors.New("sync interval must be greater than 0")
 	ErrInvalidL0Retention              = errors.New("l0 retention must not be negative")
+	ErrInvalidCompactionMaxInputFiles  = errors.New("compaction max input files must not be negative")
 	ErrInvalidL0RetentionCheckInterval = errors.New("l0 retention check interval must be greater than 0")
 	ErrInvalidShutdownSyncTimeout      = errors.New("shutdown-sync-timeout must be >= 0")
 	ErrInvalidShutdownSyncInterval     = errors.New("shutdown sync interval must be greater than 0")
@@ -295,6 +296,9 @@ type Config struct {
 	// When enabled, logs warnings if gaps or overlaps are detected.
 	VerifyCompaction bool `yaml:"verify-compaction"`
 
+	// Maximum source files merged per compaction pass. Zero means unbounded.
+	CompactionMaxInputFiles *int `yaml:"compaction-max-input-files"`
+
 	// Retention configuration
 	Retention RetentionConfig `yaml:"retention"`
 
@@ -430,6 +434,13 @@ func (c *Config) Validate() error {
 			Err:   ErrInvalidSnapshotRetention,
 			Field: "snapshot.retention",
 			Value: *c.Snapshot.Retention,
+		}
+	}
+	if c.CompactionMaxInputFiles != nil && *c.CompactionMaxInputFiles < 0 {
+		return &ConfigValidationError{
+			Err:   ErrInvalidCompactionMaxInputFiles,
+			Field: "compaction-max-input-files",
+			Value: *c.CompactionMaxInputFiles,
 		}
 	}
 	if c.L0Retention != nil && *c.L0Retention < 0 {

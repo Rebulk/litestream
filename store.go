@@ -110,6 +110,9 @@ type Store struct {
 	// If true, verify TXID consistency at destination level after each compaction.
 	VerifyCompaction bool
 
+	// CompactionMaxInputFiles bounds source files per compaction pass.
+	CompactionMaxInputFiles int
+
 	// RetentionEnabled controls whether Litestream actively deletes old files
 	// during retention enforcement. When false, cloud provider lifecycle
 	// policies handle retention instead. Local file cleanup still occurs.
@@ -146,6 +149,7 @@ func NewStore(dbs []*DB, levels CompactionLevels) *Store {
 		L0RetentionCheckInterval: DefaultL0RetentionCheckInterval,
 		CompactionMonitorEnabled: true,
 		RetentionEnabled:         true,
+		CompactionMaxInputFiles:  DefaultCompactionMaxInputFiles,
 		ShutdownSyncTimeout:      DefaultShutdownSyncTimeout,
 		ShutdownSyncInterval:     DefaultShutdownSyncInterval,
 		HeartbeatCheckInterval:   DefaultHeartbeatCheckInterval,
@@ -158,6 +162,7 @@ func NewStore(dbs []*DB, levels CompactionLevels) *Store {
 		db.ShutdownSyncTimeout = s.ShutdownSyncTimeout
 		db.ShutdownSyncInterval = s.ShutdownSyncInterval
 		db.VerifyCompaction = s.VerifyCompaction
+		db.CompactionMaxInputFiles = s.CompactionMaxInputFiles
 		db.RetentionEnabled = s.RetentionEnabled
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -308,6 +313,7 @@ func (s *Store) RegisterDB(db *DB) error {
 	db.ShutdownSyncTimeout = s.ShutdownSyncTimeout
 	db.ShutdownSyncInterval = s.ShutdownSyncInterval
 	db.VerifyCompaction = s.VerifyCompaction
+	db.CompactionMaxInputFiles = s.CompactionMaxInputFiles
 	db.RetentionEnabled = s.RetentionEnabled
 	db.Done = s.done
 
@@ -526,6 +532,18 @@ func (s *Store) SetShutdownSyncInterval(d time.Duration) {
 	s.ShutdownSyncInterval = d
 	for _, db := range s.dbs {
 		db.ShutdownSyncInterval = d
+	}
+}
+
+// SetCompactionMaxInputFiles bounds the source files merged per compaction
+// pass and propagates it to all managed databases. Zero means unbounded.
+func (s *Store) SetCompactionMaxInputFiles(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CompactionMaxInputFiles = n
+	for _, db := range s.dbs {
+		db.CompactionMaxInputFiles = n
+		db.compactor.MaxInputFiles = n
 	}
 }
 

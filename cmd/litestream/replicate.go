@@ -255,6 +255,9 @@ func (c *ReplicateCommand) Run(ctx context.Context) (err error) {
 	if c.Config.ShutdownSyncInterval != nil {
 		c.Store.SetShutdownSyncInterval(*c.Config.ShutdownSyncInterval)
 	}
+	if c.Config.CompactionMaxInputFiles != nil {
+		c.Store.SetCompactionMaxInputFiles(*c.Config.CompactionMaxInputFiles)
+	}
 	if c.Config.VerifyCompaction {
 		c.Store.SetVerifyCompaction(true)
 	}
