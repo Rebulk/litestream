@@ -4761,14 +4761,21 @@ func TestDB_ReadLockSurvivesContextCancel(t *testing.T) {
 	})
 }
 
-// mustOpenMetricsDB opens a DB backed by a temp-dir test replica.
-func mustOpenMetricsDB(t *testing.T, path string) *DB {
+// newMetricsDB returns an unopened DB backed by a temp-dir test replica.
+func newMetricsDB(t *testing.T, path string) *DB {
 	t.Helper()
 	db := NewDB(path)
 	db.MonitorInterval = 0
 	db.Replica = NewReplica(db)
 	db.Replica.Client = &testReplicaClient{dir: t.TempDir()}
 	db.Replica.MonitorEnabled = false
+	return db
+}
+
+// mustOpenMetricsDB opens a DB backed by a temp-dir test replica.
+func mustOpenMetricsDB(t *testing.T, path string) *DB {
+	t.Helper()
+	db := newMetricsDB(t, path)
 	if err := db.Open(); err != nil {
 		t.Fatal(err)
 	}
@@ -4886,7 +4893,9 @@ func TestDB_ClosePreservesSharedMetrics(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	duplicate := mustOpenMetricsDB(t, path)
+	// Only one DB per path can be open at a time (see acquireInstanceLock),
+	// but a second DB for the same path still registers its series.
+	duplicate := newMetricsDB(t, path)
 	t.Cleanup(func() {
 		if err := duplicate.Close(ctx); err != nil {
 			t.Error(err)
@@ -4905,10 +4914,13 @@ func TestDB_ClosePreservesSharedMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(syncNCounterVec.WithLabelValues(path)); got != 1 {
 		t.Fatalf("sync count=%v, want 1", got)
 	}
-	if err := duplicate.Open(); err != nil {
-		t.Fatal(err)
+	if err := duplicate.Open(); !errors.Is(err, ErrInstanceLocked) {
+		t.Fatalf("duplicate Open: err=%v, want ErrInstanceLocked", err)
 	}
 	if err := active.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := duplicate.Open(); err != nil {
 		t.Fatal(err)
 	}
 	duplicate.syncNCounter.Inc()

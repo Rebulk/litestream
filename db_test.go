@@ -3,6 +3,7 @@ package litestream_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"hash/crc64"
 	"io"
@@ -1972,5 +1973,99 @@ func TestDB_Monitor_LogsContextErrorFromReplicaClient(t *testing.T) {
 			t.Fatalf("expected sync error to be logged; logs:\n%s", logs.String())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDB_Open_InstanceLock verifies that a second DB for the same path cannot
+// open while the first is open, and that the refused Open leaves the first
+// instance's staging files alone.
+func TestDB_Open_InstanceLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db")
+	newDB := func() *litestream.DB {
+		db := testingutil.NewDB(t, path)
+		db.MonitorInterval = 0
+		db.Replica = litestream.NewReplicaWithClient(db, file.NewReplicaClient(filepath.Join(dir, "replica")))
+		db.Replica.MonitorEnabled = false
+		return db
+	}
+
+	first := newDB()
+	if err := first.Open(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close(context.Background()) }()
+
+	// Stand in for an L0 file the first instance is still staging.
+	tmpPath := filepath.Join(first.LTXLevelDir(0), "0000000000000001-0000000000000001.ltx.tmp")
+	if err := os.MkdirAll(filepath.Dir(tmpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmpPath, []byte("staging"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newDB()
+	if err := second.Open(); !errors.Is(err, litestream.ErrInstanceLocked) {
+		t.Fatalf("second Open: err=%v, want ErrInstanceLocked", err)
+	}
+	if second.IsOpen() {
+		t.Fatal("second DB reports open after a refused Open")
+	}
+	if _, err := os.Stat(tmpPath); err != nil {
+		t.Fatalf("refused Open removed the first instance's temp file: %v", err)
+	}
+
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Open(); err != nil {
+		t.Fatalf("Open after first Close: %v", err)
+	}
+	if err := second.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDB_Open_InstanceLock_MissingDirectory verifies that Open creates nothing
+// when the database's directory does not exist yet, and that the lock is
+// taken once the database appears.
+func TestDB_Open_InstanceLock_MissingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does", "not", "exist")
+	path := filepath.Join(dir, "db")
+	replicaPath := t.TempDir()
+	newDB := func() *litestream.DB {
+		db := testingutil.NewDB(t, path)
+		db.MonitorInterval = 0
+		db.Replica = litestream.NewReplicaWithClient(db, file.NewReplicaClient(replicaPath))
+		db.Replica.MonitorEnabled = false
+		return db
+	}
+
+	first := newDB()
+	if err := first.Open(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close(context.Background()) }()
+	if _, err := os.Stat(filepath.Dir(dir)); !os.IsNotExist(err) {
+		t.Fatalf("Open created the database's parent directory: stat err=%v", err)
+	}
+
+	// The application creates its directory and database later.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sqldb := testingutil.MustOpenSQLDB(t, path)
+	defer testingutil.MustCloseSQLDB(t, sqldb)
+	if _, err := sqldb.Exec(`CREATE TABLE t (x)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newDB()
+	if err := second.Open(); !errors.Is(err, litestream.ErrInstanceLocked) {
+		t.Fatalf("second Open after first sync: err=%v, want ErrInstanceLocked", err)
 	}
 }

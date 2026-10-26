@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"errors"
 	"io"
 	"os"
 	"syscall"
@@ -9,6 +10,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+// ErrFileLocked is returned by TryLockFile when another holder has the lock.
+var ErrFileLocked = errors.New("file locked")
 
 // ReadCloser wraps a reader to also attach a separate closer.
 type ReadCloser struct {

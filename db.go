@@ -71,6 +71,7 @@ type DB struct {
 	metaPath  string        // Path to the database metadata.
 	db        *sql.DB       // target database
 	f         *os.File      // long-running db file descriptor
+	lockFile  *os.File      // instance lock in the meta directory, held while open
 	rtx       *sql.Tx       // long running read transaction
 	pageSize  int           // page size, in bytes
 	notify    chan struct{} // closes on WAL change
@@ -844,8 +845,18 @@ func (db *DB) Open() (err error) {
 		return fmt.Errorf("minimum checkpoint page count required")
 	}
 
+	// Refuse a database another instance is replicating. Must precede
+	// removeTmpFiles, which would delete that instance's staging files.
+	db.mu.Lock()
+	err = db.acquireInstanceLock()
+	db.mu.Unlock()
+	if err != nil {
+		return err
+	}
+
 	// Clear old temporary files that my have been left from a crash.
 	if err := removeTmpFiles(db.metaPath); err != nil {
+		_ = db.releaseInstanceLock()
 		return fmt.Errorf("cannot remove tmp files: %w", err)
 	}
 
@@ -930,11 +941,73 @@ func (db *DB) Close(ctx context.Context) (err error) {
 		}
 	}
 
+	// Release after the final sync so the next instance can't start early.
+	if e := db.releaseInstanceLock(); e != nil && err == nil {
+		err = e
+	}
+
 	// Remove this database's series now that the final sync has recorded
 	// its last values.
 	db.deleteMetrics()
 
 	return err
+}
+
+// acquireInstanceLock takes an exclusive, non-blocking lock on a file in the
+// meta directory, held until Close. It returns ErrInstanceLocked if another DB
+// holds it. If the database's directory does not exist yet it creates nothing;
+// init takes the lock once the database exists. The caller must hold db.mu.
+func (db *DB) acquireInstanceLock() error {
+	if db.lockFile != nil {
+		return nil
+	}
+
+	// Match the ownership init gives the meta directory.
+	dirInfo, err := os.Stat(filepath.Dir(db.path))
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat database directory: %w", err)
+	}
+	if err := internal.MkdirAll(db.metaPath, dirInfo); err != nil {
+		return fmt.Errorf("create meta directory: %w", err)
+	}
+
+	path := filepath.Join(db.metaPath, "lock")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return fmt.Errorf("open instance lock: %w", err)
+	}
+	uid, gid := internal.Fileinfo(dirInfo)
+	_ = os.Chown(path, uid, gid)
+
+	if err := internal.TryLockFile(f); err != nil {
+		_ = f.Close()
+		if errors.Is(err, internal.ErrFileLocked) {
+			return fmt.Errorf("%w: %s (lock file %s)", ErrInstanceLocked, db.path, path)
+		}
+		return fmt.Errorf("lock %s: %w", path, err)
+	}
+
+	db.lockFile = f
+	return nil
+}
+
+// releaseInstanceLock releases the lock taken by acquireInstanceLock, if held.
+func (db *DB) releaseInstanceLock() error {
+	db.mu.Lock()
+	f := db.lockFile
+	db.lockFile = nil
+	db.mu.Unlock()
+
+	if f == nil {
+		return nil
+	}
+	if err := internal.ReleaseFileLock(f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("release instance lock: %w", err)
+	}
+	return f.Close()
 }
 
 // syncReplicaWithRetry attempts to sync the replica with retry logic for shutdown.
@@ -1102,6 +1175,11 @@ func (db *DB) init(ctx context.Context) (err error) {
 		return err
 	}
 	db.dirInfo = fi
+
+	// Take the instance lock if Open could not (no database directory yet).
+	if err := db.acquireInstanceLock(); err != nil {
+		return err
+	}
 
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=wal_autocheckpoint(0)",
 		db.path, db.BusyTimeout.Milliseconds())

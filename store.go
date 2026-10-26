@@ -105,9 +105,10 @@ const (
 // It manages async background tasks like compactions so that the system
 // is not overloaded by too many concurrent tasks.
 type Store struct {
-	mu     sync.Mutex
-	dbs    []*DB
-	levels CompactionLevels
+	mu          sync.Mutex
+	dbs         []*DB
+	registering map[string]chan struct{} // paths a RegisterDB call is opening
+	levels      CompactionLevels
 
 	wg     sync.WaitGroup
 	ctx    context.Context
@@ -157,8 +158,9 @@ type Store struct {
 
 func NewStore(dbs []*DB, levels CompactionLevels) *Store {
 	s := &Store{
-		dbs:    dbs,
-		levels: levels,
+		dbs:         dbs,
+		registering: make(map[string]chan struct{}),
+		levels:      levels,
 
 		SnapshotInterval:         DefaultSnapshotInterval,
 		SnapshotRetention:        DefaultSnapshotRetention,
@@ -313,15 +315,33 @@ func (s *Store) RegisterDB(db *DB) error {
 		return fmt.Errorf("db required")
 	}
 
-	// First check: see if database already exists
+	// First check: see if database already exists. Wait for a concurrent
+	// registration of the same path, since a second DB could not open it.
 	s.mu.Lock()
-	for _, existing := range s.dbs {
-		if existing.Path() == db.Path() {
-			s.mu.Unlock()
-			return nil
+	for {
+		for _, existing := range s.dbs {
+			if existing.Path() == db.Path() {
+				s.mu.Unlock()
+				return nil
+			}
 		}
+		ch, ok := s.registering[db.Path()]
+		if !ok {
+			break
+		}
+		s.mu.Unlock()
+		<-ch
+		s.mu.Lock()
 	}
+	ch := make(chan struct{})
+	s.registering[db.Path()] = ch
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.registering, db.Path())
+		s.mu.Unlock()
+		close(ch)
+	}()
 
 	// Apply store-wide settings before opening the database.
 	db.SetLogger(s.Logger.With(LogKeyDB, filepath.Base(db.Path())))

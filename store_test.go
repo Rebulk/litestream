@@ -783,3 +783,33 @@ func TestStore_Close_StopsMonitorsBeforeClosingDBs(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	}
 }
+
+// TestStore_RegisterDB_ConcurrentSamePath verifies that concurrent registrations
+// of one database all succeed, even though only one can hold its instance lock.
+func TestStore_RegisterDB_ConcurrentSamePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	replicaPath := t.TempDir()
+	store := litestream.NewStore(nil, litestream.CompactionLevels{{Level: 0}})
+	store.CompactionMonitorEnabled = false
+	require.NoError(t, store.Open(t.Context()))
+	defer store.Close(context.Background())
+
+	const n = 8
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			db := testingutil.NewDB(t, path)
+			db.MonitorInterval = 0
+			db.Replica = litestream.NewReplicaWithClient(db, file.NewReplicaClient(replicaPath))
+			db.Replica.MonitorEnabled = false
+			<-start
+			errs <- store.RegisterDB(db)
+		}()
+	}
+	close(start)
+	for i := 0; i < n; i++ {
+		require.NoError(t, <-errs)
+	}
+	require.Len(t, store.DBs(), 1)
+}

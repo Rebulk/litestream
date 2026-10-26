@@ -294,6 +294,17 @@ type Lease struct {
 4. If `PreconditionFailed` (412), another instance acquired first
 5. Return lease with ETag for subsequent renewal
 
+### Local Instance Lock
+
+`DB.Open()` also takes a local lock so two instances never replicate one database (`acquireInstanceLock` in `db.go`):
+
+- **File**: `lock` in the metadata directory, held from `Open()` until `Close()`
+- **Mechanism**: `flock` on Unix (`internal/file_lock_unix.go`), `LockFileEx` on Windows (`internal/file_lock_windows.go`)
+- **Refusal**: a second `DB` for the same database, in another process or the same one, gets `ErrInstanceLocked`
+- **Ordering**: taken before temp files are cleared, so a refused `Open()` never deletes the running instance's staging files
+- **Scope**: instances that share the metadata directory only; separate hosts writing one destination need leasing
+- **Limit**: deleting the metadata directory while an instance runs defeats the lock (nothing in Litestream does; `reset` removes only `ltx/`)
+
 ## Library Convenience Methods
 
 These methods on `DB` (`db.go`) simplify common operations when Litestream is used as a library:

@@ -36,6 +36,7 @@ var (
 	ErrLTXCorrupted     = errors.New("ltx file corrupted")
 	ErrLTXMissing       = errors.New("ltx file missing")
 	ErrDiskFull         = errors.New("disk full")
+	ErrInstanceLocked   = errors.New("database is already being replicated by another litestream instance")
 )
 
 // LTXError provides detailed context for LTX file errors with recovery hints.
